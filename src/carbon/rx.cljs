@@ -117,7 +117,7 @@
             (gc source)))
         (set! sources #{})
         (set! state ::thunk)
-        (when drop (drop)))))
+        (when drop (drop this)))))
   (add-source [_ source]
     (set! sources (conj sources source)))
   (remove-source [_ source]
@@ -201,3 +201,17 @@
   ([getter setter meta validator] (rx* getter setter meta validator nil))
   ([getter setter meta validator drop]
    (ReactiveExpression. getter setter meta validator drop ::thunk {} 0 #{} #{})))
+
+(def cursor-cache (volatile! {}))
+
+(def normalize-cursor-path vec)
+
+(defn cursor [parent path]
+  (let [path (normalize-cursor-path path)]
+    (or (get @cursor-cache path)
+        (let [x (rx* #(get-in @parent path)
+                     #(swap! parent assoc-in path %)
+                     nil nil
+                     #(vswap! cursor-cache dissoc path))]
+          (vswap! cursor-cache assoc path x)
+          x))))
