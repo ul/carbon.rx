@@ -176,7 +176,7 @@
       (vswap! *dirty-sinks* into (get-sinks source))
       (->> source get-sinks (into empty-queue) propagate clean))))
 
-(defn cell [x & m]
+(defn cell* [x & m]
   (let [sinks (volatile! #{})]
     (specify! (apply atom x m)
 
@@ -191,8 +191,6 @@
         (register this)
         (add-watch this ::rx watch)
         (.-state this)))))
-
-(def $ cell)
 
 (defn rx*
   ([getter] (rx* getter nil nil nil nil))
