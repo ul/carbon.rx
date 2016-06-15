@@ -1,4 +1,5 @@
-(ns carbon.rx)
+(ns carbon.rx
+  (:require-macros [carbon.rx :as rx]))
 
 (defprotocol IReactiveSource
   (get-rank [_])
@@ -11,6 +12,11 @@
   (gc [_])
   (add-source [_ source])
   (remove-source [_ source]))
+
+(defprotocol IDrop
+  (add-drop [_ key f])
+  (remove-drop [_ key])
+  (notify-drops [_]))
 
 (def ^:dynamic *rx* nil)                                    ; current parent expression
 (def ^:dynamic *rank* nil)                                  ; highest rank met during expression compute
@@ -65,7 +71,7 @@
       (clean (reverse @sources)))
     result))
 
-(deftype ReactiveExpression [getter setter meta validator drop
+(deftype ReactiveExpression [getter setter meta validator ^:mutable drop
                              ^:mutable state ^:mutable watches
                              ^:mutable rank ^:mutable sources ^:mutable sinks]
 
@@ -117,11 +123,22 @@
             (gc source)))
         (set! sources #{})
         (set! state ::thunk)
-        (when drop (drop this)))))
+        (notify-drops this))))
   (add-source [_ source]
     (set! sources (conj sources source)))
   (remove-source [_ source]
     (set! sources (disj sources source)))
+
+  IDrop
+  (add-drop [this key f]
+    (set! drop (assoc drop key f))
+    this)
+  (remove-drop [this key]
+    (set! drop (dissoc drop key))
+    this)
+  (notify-drops [this]
+    (doseq [[key f] drop]
+      (f key this)))
 
   IMeta
   (-meta [_] meta)
@@ -207,9 +224,8 @@
 (defn cursor [parent path]
   (let [path (normalize-cursor-path path)]
     (or (get @cursor-cache path)
-        (let [x (rx* #(get-in @parent path)
-                     #(swap! parent assoc-in path %)
-                     nil nil
-                     #(vswap! cursor-cache dissoc path))]
+        (let [x (rx/lens (get-in @parent path)
+                         #(swap! parent assoc-in path %))]
+          (add-drop x ::cursor #(vswap! cursor-cache dissoc path))
           (vswap! cursor-cache assoc path x)
           x))))
