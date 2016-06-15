@@ -1,4 +1,4 @@
-(defproject carbon/rx "0.1.3"
+(defproject carbon/rx "0.1.4"
   :description "Spreadsheet FRP library"
   :url "https://github.com/ul/carbon.rx"
   :license {:name "Eclipse Public License"

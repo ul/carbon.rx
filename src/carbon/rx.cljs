@@ -101,7 +101,7 @@
     (when ^boolean js/goog.DEBUG
       (when (some #(identical? this %) *provenance*)
         (throw (js/Error. (str "carbon.rx: detected a cycle in computation graph!\n"
-                               (pr-str *provenance*))))))
+                               (pr-str (map meta *provenance*)))))))
     (let [old-value state
           r (volatile! 0)
           new-value (binding [*rx* this
@@ -219,13 +219,19 @@
 
 (def cursor-cache (volatile! {}))
 
+(defn cache-dissoc [cache parent path]
+  (let [cache (update cache parent dissoc path)]
+    (if (empty? (get cache parent))
+      (dissoc cache parent)
+      cache)))
+
 (def normalize-cursor-path vec)
 
 (defn cursor [parent path]
-  (let [path (normalize-cursor-path path)]
-    (or (get @cursor-cache path)
-        (let [x (rx/lens (get-in @parent path)
-                         #(swap! parent assoc-in path %))]
-          (add-drop x ::cursor #(vswap! cursor-cache dissoc path))
-          (vswap! cursor-cache assoc path x)
-          x))))
+  (rx/no-rx
+    (let [path (normalize-cursor-path path)]
+      (or (get-in @cursor-cache [parent path])
+          (let [x (rx/lens (get-in @parent path) (partial swap! parent assoc-in path))]
+            (add-drop x ::cursor #(vswap! cursor-cache cache-dissoc parent path))
+            (vswap! cursor-cache assoc-in [parent path] x)
+            x)))))
