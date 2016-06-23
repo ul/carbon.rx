@@ -71,6 +71,31 @@
       (clean (reverse @sources)))
     result))
 
+(defn map-map [f g m]
+  (persistent!
+    (reduce-kv
+      (fn [m k v]
+        (assoc! m (f k) (g v)))
+      (transient {})
+      m)))
+
+(defn map-set [f s]
+  (persistent!
+    (reduce
+      (fn [s x]
+        (conj! s (f x)))
+      (transient #{})
+      s)))
+
+(defn realize [x]
+  (cond
+    (satisfies? IMap x) (map-map realize realize x)
+    (satisfies? IVector x) (mapv realize x)
+    (satisfies? ISet x) (map-set realize x)
+    ;; LazySeq, List etc.
+    (coll? x) (doall (map realize x))
+    :else x))
+
 (deftype ReactiveExpression [getter setter meta validator ^:mutable drop
                              ^:mutable state ^:mutable watches
                              ^:mutable rank ^:mutable sources ^:mutable sinks]
@@ -107,7 +132,7 @@
           new-value (binding [*rx* this
                               *rank* r
                               *provenance* (conj *provenance* this)]
-                      (getter))]
+                      (realize (getter)))]
       (set! rank (inc @r))
       (when (not= old-value new-value)
         (set! state new-value)
