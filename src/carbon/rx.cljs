@@ -71,32 +71,18 @@
       (clean (reverse @sources)))
     result))
 
-(defn map-map [f g m]
-  (persistent!
-    (reduce-kv
-      (fn [m k v]
-        (assoc! m (f k) (g v)))
-      (transient {})
-      m)))
+(defn safe-realized? [x]
+  (if (implements? IPending x)
+    (realized? x)
+    true))
 
-(defn map-set [f s]
-  (persistent!
-    (reduce
-      (fn [s x]
-        (conj! s (f x)))
-      (transient #{})
-      s)))
+(defn fully-realized?
+  [form]
+  (if (seqable? form)
+    (and (safe-realized? form) (every? fully-realized? form))
+    (safe-realized? form)))
 
-(defn realize [x]
-  (cond
-    (satisfies? IMap x) (map-map realize realize x)
-    (satisfies? IVector x) (mapv realize x)
-    (satisfies? ISet x) (map-set realize x)
-    ;; LazySeq, List etc.
-    (coll? x) (doall (map realize x))
-    :else x))
-
-(deftype ReactiveExpression [getter setter meta validator ^:mutable drop
+(deftype ReactiveExpression [getter setter metadata validator ^:mutable drop
                              ^:mutable state ^:mutable watches
                              ^:mutable rank ^:mutable sources ^:mutable sinks]
 
@@ -132,7 +118,14 @@
           new-value (binding [*rx* this
                               *rank* r
                               *provenance* (conj *provenance* this)]
-                      (realize (getter)))]
+                      (let [x (getter)]
+                        (when ^boolean js/goog.DEBUG
+                          (when-not (fully-realized? x)
+                            (js/console.warn
+                              "carbon.rx: this branch returns not fully realized value, make sure that no dependencies are derefed inside lazy part:\n"
+                              (map meta *provenance*)
+                              "\n" x)))
+                        x))]
       (set! rank (inc @r))
       (when (not= old-value new-value)
         (set! state new-value)
@@ -166,7 +159,7 @@
       (f key this)))
 
   IMeta
-  (-meta [_] meta)
+  (-meta [_] metadata)
 
   IWatchable
   (-notify-watches [this oldval newval]
