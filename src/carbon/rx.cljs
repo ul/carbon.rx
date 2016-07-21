@@ -9,6 +9,7 @@
 
 (defprotocol IReactiveExpression
   (compute [_])
+  (computed? [_])
   (gc [_])
   (add-source [_ source])
   (remove-source [_ source]))
@@ -94,7 +95,7 @@
 
   IDeref
   (-deref [this]
-    (when (= state ::thunk) (compute this))
+    (when-not (computed? this) (compute this))
     (register this)
     state)
 
@@ -105,6 +106,8 @@
   (get-sinks [_] sinks)
 
   IReactiveExpression
+  (computed? [this]
+    (not= state ::thunk))
   (compute [this]
     (doseq [source sources]
       (remove-sink source this))
@@ -166,7 +169,7 @@
     (doseq [[key f] watches]
       (f key this oldval newval)))
   (-add-watch [this key f]
-    (when (= state ::thunk) (compute this))
+    (when-not (computed? this) (compute this))
     (set! watches (assoc watches key f))
     this)
   (-remove-watch [this key]
@@ -193,16 +196,16 @@
 
   ISwap
   (-swap! [this f]
-    (when (= state ::thunk) (compute this))
+    (when-not (computed? this) (compute this))
     (reset! this (f state)))
   (-swap! [this f x]
-    (when (= state ::thunk) (compute this))
+    (when-not (computed? this) (compute this))
     (reset! this (f state x)))
   (-swap! [this f x y]
-    (when (= state ::thunk) (compute this))
+    (when-not (computed? this) (compute this))
     (reset! this (f state x y)))
   (-swap! [this f x y xs]
-    (when (= state ::thunk) (compute this))
+    (when-not (computed? this) (compute this))
     (reset! this (apply f state x y xs))))
 
 (defn watch [_ source o n]
