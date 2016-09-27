@@ -1,4 +1,4 @@
-(ns carbon.rx
+(ns carbon.macros
   (:refer-clojure :exclude [dosync])
   (:require [clojure.pprint :as pp]))
 
