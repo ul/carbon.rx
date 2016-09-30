@@ -1,5 +1,5 @@
 (ns carbon.rx
-  (#?(:clj :require :cljs :require-macros) [carbon.macros :as macros])
+  (#?(:clj :require :cljs :require-macros) [carbon.macros :as macros :refer [no-rx]])
   #?(:clj
      (:import [clojure.lang IDeref IMeta IAtom IRef]))
   #?(:clj
@@ -179,24 +179,14 @@
          (gc this)
          this)
 
-       ;; FIXME not atomic
        IAtom
-       (swap [this f]
-         (when-not (computed? this) (compute this))
-         (reset! this (f @state)))
-       (swap [this f x]
-         (when-not (computed? this) (compute this))
-         (reset! this (f @state x)))
-       (swap [this f x y]
-         (when-not (computed? this) (compute this))
-         (reset! this (f @state x y)))
-       (swap [this f x y xs]
-         (when-not (computed? this) (compute this))
-         (reset! this (apply f @state x y xs)))
+       (swap [this f] (no-rx (reset! this (f @this))))
+       (swap [this f x] (no-rx (reset! this (f @this x))))
+       (swap [this f x y] (no-rx (reset! this (f @this x y))))
+       (swap [this f x y xs] (no-rx (reset! this (apply f @this x y xs))))
        (compareAndSet [this oldval newval]
          (if (= oldval @state)
-           (do (reset! this newval)
-               true)
+           (do (reset! this newval) true)
            false))
        (reset [_ new-value]
          (assert setter "Can't reset lens w/o setter")
@@ -231,18 +221,10 @@
                 new-value)
 
        ISwap
-       (-swap! [this f]
-               (when-not (computed? this) (compute this))
-               (reset! this (f @state)))
-       (-swap! [this f x]
-               (when-not (computed? this) (compute this))
-               (reset! this (f @state x)))
-       (-swap! [this f x y]
-               (when-not (computed? this) (compute this))
-               (reset! this (f @state x y)))
-       (-swap! [this f x y xs]
-               (when-not (computed? this) (compute this))
-               (reset! this (apply f @state x y xs)))
+       (-swap! [this f] (no-rx (reset! this (f @this))))
+       (-swap! [this f x] (no-rx (reset! this (f @this x))))
+       (-swap! [this f x y] (no-rx (reset! this (f @this x y))))
+       (-swap! [this f x y xs] (no-rx (reset! this (apply f @this x y xs))))
 
        Object
        (equiv [this other] (-equiv this other))
@@ -299,30 +281,29 @@
      (reset [_ x] (reset! state x))))
 
 #?(:clj
-   (defn cell*
-     ([x]
-      (Cell. (atom x) nil (atom #{})))
-     ([x m]
-      (Cell. (apply atom x (flatten (seq m))) (get m :meta) (atom #{}))))
+   (defn atom->cell [a m]
+     (Cell. a m (atom #{})))
 
    :cljs
-   (defn cell*
-     ([x] (cell* x nil))
-     ([x m]
-      (let [sinks (atom #{})]
-        (specify! (apply atom x (flatten (seq m)))
+   (defn atom->cell [a _]
+     (let [sinks (atom #{})]
+       (specify! a
 
-          IReactiveSource
-          (get-rank [_] 0)
-          (add-sink [_ sink] (swap! sinks conj sink))
-          (remove-sink [_ sink] (swap! sinks disj sink))
-          (get-sinks [_] @sinks)
+         IReactiveSource
+         (get-rank [_] 0)
+         (add-sink [_ sink] (swap! sinks conj sink))
+         (remove-sink [_ sink] (swap! sinks disj sink))
+         (get-sinks [_] @sinks)
 
-          IDeref
-          (-deref [this]
-            (register this)
-            (add-watch this this watch)
-            (.-state this)))))))
+         IDeref
+         (-deref [this]
+           (register this)
+           (add-watch this this watch)
+           (.-state this))))))
+
+(defn cell*
+  ([x] (atom->cell (atom x) nil))
+  ([x m] (atom->cell (apply atom x (flatten (seq m))) (get m :meta))))
 
 (defn rx*
   ([getter] (rx* getter nil nil nil nil))
@@ -343,7 +324,7 @@
 (def normalize-cursor-path vec)
 
 (defn cursor [parent path]
-  (macros/no-rx
+  (no-rx
     (let [path (normalize-cursor-path path)]
       (or (get-in @cursor-cache [parent path])
           (let [x (macros/lens (get-in @parent path) (partial swap! parent assoc-in path))]
