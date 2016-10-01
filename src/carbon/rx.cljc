@@ -1,5 +1,5 @@
 (ns carbon.rx
-  (#?(:clj :require :cljs :require-macros) [carbon.macros :as macros :refer [no-rx]])
+  (#?(:clj :require :cljs :require-macros) [carbon.macros :as macros])
   #?(:clj
      (:import [clojure.lang IDeref IMeta IAtom IRef]))
   #?(:clj
@@ -180,10 +180,10 @@
          this)
 
        IAtom
-       (swap [this f] (no-rx (reset! this (f @this))))
-       (swap [this f x] (no-rx (reset! this (f @this x))))
-       (swap [this f x y] (no-rx (reset! this (f @this x y))))
-       (swap [this f x y xs] (no-rx (reset! this (apply f @this x y xs))))
+       (swap [this f] (macros/no-rx (reset! this (f @this))))
+       (swap [this f x] (macros/no-rx (reset! this (f @this x))))
+       (swap [this f x y] (macros/no-rx (reset! this (f @this x y))))
+       (swap [this f x y xs] (macros/no-rx (reset! this (apply f @this x y xs))))
        (compareAndSet [this oldval newval]
          (if (= oldval @state)
            (do (reset! this newval) true)
@@ -221,10 +221,10 @@
                 new-value)
 
        ISwap
-       (-swap! [this f] (no-rx (reset! this (f @this))))
-       (-swap! [this f x] (no-rx (reset! this (f @this x))))
-       (-swap! [this f x y] (no-rx (reset! this (f @this x y))))
-       (-swap! [this f x y xs] (no-rx (reset! this (apply f @this x y xs))))
+       (-swap! [this f] (macros/no-rx (reset! this (f @this))))
+       (-swap! [this f x] (macros/no-rx (reset! this (f @this x))))
+       (-swap! [this f x y] (macros/no-rx (reset! this (f @this x y))))
+       (-swap! [this f x y xs] (macros/no-rx (reset! this (apply f @this x y xs))))
 
        Object
        (equiv [this other] (-equiv this other))
@@ -324,7 +324,7 @@
 (def normalize-cursor-path vec)
 
 (defn cursor [parent path]
-  (no-rx
+  (macros/no-rx
     (let [path (normalize-cursor-path path)]
       (or (get-in @cursor-cache [parent path])
           (let [x (macros/lens (get-in @parent path) (partial swap! parent assoc-in path))]
