@@ -121,13 +121,13 @@
                               *rank* r
                               *provenance* (conj *provenance* this)]
                       (let [x (getter)]
-                        #?(:cljs
-                           (when ^boolean js/goog.DEBUG
-                             (when-not (fully-realized? x)
-                               (js/console.warn
-                                 "carbon.rx: this branch returns not fully realized value, make sure that no dependencies are derefed inside lazy part:\n"
-                                 (map meta *provenance*)
-                                 "\n" x))))
+                        ;; #?(:cljs
+                        ;;    (when ^boolean js/goog.DEBUG
+                        ;;      (when-not (fully-realized? x)
+                        ;;        (js/console.warn
+                        ;;          "carbon.rx: this branch returns not fully realized value, make sure that no dependencies are derefed inside lazy part:\n"
+                        ;;          (map meta *provenance*)
+                        ;;          "\n" x))))
                         x))]
       (reset! rank (inc @r))
       (when (not= old-value new-value)

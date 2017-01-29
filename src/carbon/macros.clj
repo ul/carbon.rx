@@ -16,44 +16,44 @@
 (defmacro lens
   ([getter]
    `(carbon.rx/rx*
-      (fn [] ~getter)
-      nil
-      ~(meta-merge nil &form)))
+     (fn [] ~getter)
+     nil
+     ~(meta-merge nil &form)))
   ([getter setter]
    `(carbon.rx/rx*
-      (fn [] ~getter)
-      ~setter
-      ~(meta-merge nil &form)))
+     (fn [] ~getter)
+     ~setter
+     ~(meta-merge nil &form)))
   ([getter setter meta]
    `(carbon.rx/rx*
-      (fn [] ~getter)
-      ~setter
-      ~(meta-merge meta &form)))
+     (fn [] ~getter)
+     ~setter
+     ~(meta-merge meta &form)))
   ([getter setter meta validator]
    `(carbon.rx/rx*
-      (fn [] ~getter)
-      ~setter
-      ~(meta-merge meta &form)
-      ~validator))
+     (fn [] ~getter)
+     ~setter
+     ~(meta-merge meta &form)
+     ~validator))
   ([getter setter meta validator drop]
    `(carbon.rx/rx*
-      (fn [] ~getter)
-      ~setter
-      ~(meta-merge meta &form)
-      ~validator
-      ~drop)))
+     (fn [] ~getter)
+     ~setter
+     ~(meta-merge meta &form)
+     ~validator
+     ~drop)))
 
 (defmacro rx [& body]
   `(carbon.rx/rx*
-     (fn [] ~@body)
-     nil
-     ~(meta-merge nil &form)))
+    (fn [] ~@body)
+    nil
+    ~(meta-merge nil &form)))
 
 (defmacro $$ [& body]
   `(carbon.rx/rx*
-     (fn [] ~@body)
-     nil
-     ~(meta-merge nil &form)))
+    (fn [] ~@body)
+    nil
+    ~(meta-merge nil &form)))
 
 (defmacro dosync [& body]
   `(carbon.rx/dosync* (fn [] ~@body)))
