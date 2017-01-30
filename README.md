@@ -2,7 +2,7 @@
 
 Spreadsheet FRP library.
 
-[![Clojars Project](https://img.shields.io/clojars/v/carbon/rx.svg)](https://clojars.org/carbon/rx)
+[![Clojars Project](http://clojars.org/carbon/rx/latest-version.svg)](http://clojars.org/carbon/rx)
 
 ## Overview
 
