@@ -29,14 +29,15 @@
 (def ^:dynamic *dirty-sources* nil)                         ; subject to `gc`
 (def ^:dynamic *provenance* [])
 
-(defn compare-by [keyfn]
-  (fn [x y]
-    (compare (keyfn x) (keyfn y))))
+(defn compare-rank [x y]
+  (let [z (- (get-rank x) (get-rank y))]
+    (if (zero? z)
+      (if (identical? x y)
+        0
+        -1)
+      z)))
 
-(defn rank-hash [x]
-  [(get-rank x) (hash x)])
-
-(def empty-queue (sorted-set-by (compare-by rank-hash)))
+(def empty-queue (sorted-set-by compare-rank))
 
 (defn propagate
   "Recursively compute all dirty sinks in the `queue` and return all visited sources to clean."
