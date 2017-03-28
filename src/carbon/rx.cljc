@@ -244,9 +244,7 @@
 
 (defn watch [source _ o n]
   (when (not= o n)
-    (if *dirty-sinks*
-      (swap! *dirty-sinks* into (get-sinks source))
-      (->> source get-sinks (into empty-queue) propagate clean))))
+    (dosync* #(swap! *dirty-sinks* into (get-sinks source)))))
 
 #?(:clj
    (deftype Cell [state metadata sinks]
