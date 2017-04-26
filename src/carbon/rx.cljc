@@ -24,6 +24,7 @@
   (notify-drops [_]))
 
 (def ^:dynamic *rx* nil)                                    ; current parent expression
+(def ^:dynamic *value* nil)                                 ; previous value of expression
 (def ^:dynamic *rank* nil)                                  ; highest rank met during expression compute
 (def ^:dynamic *dirty-sinks* nil)                           ; subject to `compute`
 (def ^:dynamic *dirty-sources* nil)                         ; subject to `gc`
@@ -119,6 +120,7 @@
     (let [old-value @state
           r (atom 0)
           new-value (binding [*rx* this
+                              *value* old-value
                               *rank* r
                               *provenance* (conj *provenance* this)]
                       (let [x (getter)]
