@@ -18,7 +18,7 @@
   (add-source [_ source])
   (remove-source [_ source]))
 
-(defprotocol IDrop
+(defprotocol IReactiveDrop
   (add-drop [_ key f])
   (remove-drop [_ key])
   (notify-drops [_]))
@@ -158,7 +158,7 @@
   (remove-source [_ source]
     (swap! sources disj source))
 
-  IDrop
+  IReactiveDrop
   (add-drop [this key f]
     (swap! drop assoc key f)
     this)
