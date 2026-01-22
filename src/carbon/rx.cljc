@@ -30,13 +30,17 @@
 (def ^:dynamic *dirty-sources* nil)                         ; subject to `gc`
 (def ^:dynamic *provenance* [])
 
+(defn id [x]
+  #?(:clj (System/identityHashCode x)
+     :cljs (goog/getUid x)))
+
 (defn compare-rank [x y]
-  (let [z (- (get-rank x) (get-rank y))]
-    (if (zero? z)
-      (if (identical? x y)
-        0
-        -1)
-      z)))
+  (if (identical? x y)
+    0
+    (let [z (- (get-rank x) (get-rank y))]
+      (if (zero? z)
+        (compare (id x) (id y))
+        z))))
 
 (def empty-queue (sorted-set-by compare-rank))
 
@@ -112,11 +116,11 @@
     (doseq [source @sources]
       (remove-sink source this))
     (reset! sources #{})
-    #?(:cljs
-       (when ^boolean js/goog.DEBUG
-         (when (some #(identical? this %) *provenance*)
-           (throw (js/Error. (str "carbon.rx: detected a cycle in computation graph!\n"
-                                  (pr-str (map meta *provenance*))))))))
+    (when #?(:cljs ^boolean js/goog.DEBUG :clj *assert*)
+      (when (some #(identical? this %) *provenance*)
+        (throw (ex-info (str "carbon.rx: detected a cycle in computation graph!\n"
+                             (pr-str (map meta *provenance*)))
+                        {:provenance *provenance*}))))
     (let [old-value @state
           r (atom 0)
           new-value (binding [*rx* this
@@ -316,11 +320,13 @@
 
 (def cursor-cache (atom {}))
 
-(defn cache-dissoc [cache parent path]
-  (let [cache (update cache parent dissoc path)]
-    (if (empty? (get cache parent))
-      (dissoc cache parent)
-      cache)))
+(defn cache-dissoc [cache parent path val]
+  (if (identical? val (get-in cache [parent path]))
+    (let [cache (update cache parent dissoc path)]
+      (if (empty? (get cache parent))
+        (dissoc cache parent)
+        cache))
+    cache))
 
 (def normalize-cursor-path vec)
 
@@ -329,7 +335,7 @@
     (let [path (normalize-cursor-path path)]
       (or (get-in @cursor-cache [parent path])
           (let [x (macros/lens (get-in @parent path) (partial swap! parent assoc-in path))]
-            (add-drop x ::cursor #(swap! cursor-cache cache-dissoc parent path))
+            (add-drop x ::cursor (fn [_ dropped] (swap! cursor-cache cache-dissoc parent path dropped)))
             (swap! cursor-cache assoc-in [parent path] x)
             x)))))
 
