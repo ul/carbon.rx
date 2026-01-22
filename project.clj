@@ -1,4 +1,4 @@
-(defproject carbon/rx "0.3.0-SNAPSHOT"
+(defproject carbon/rx "0.4.0-SNAPSHOT"
   :description "Spreadsheet FRP library"
   :url "https://github.com/ul/carbon.rx"
   :license {:name "Eclipse Public License"
