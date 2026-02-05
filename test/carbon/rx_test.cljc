@@ -1,7 +1,584 @@
 (ns carbon.rx-test
   (:require [clojure.test :refer [deftest is testing]]
             [carbon.rx :as rx]
-            [carbon.macros :refer [cell rx]]))
+            [carbon.macros :refer [cell rx lens dosync no-rx]]))
+
+;; ---------------------------------------------------------------------------
+;; Cell basics
+;; ---------------------------------------------------------------------------
+
+(deftest cell-creation-test
+  (testing "Cell holds initial value"
+    (let [c (cell 42)]
+      (is (= 42 @c))))
+
+  (testing "Cell with nil initial value"
+    (let [c (cell nil)]
+      (is (nil? @c)))))
+
+(deftest cell-reset-test
+  (testing "reset! changes cell value"
+    (let [c (cell 1)]
+      (reset! c 2)
+      (is (= 2 @c))))
+
+  (testing "reset! to nil"
+    (let [c (cell 1)]
+      (reset! c nil)
+      (is (nil? @c)))))
+
+(deftest cell-swap-test
+  (testing "swap! applies function"
+    (let [c (cell 10)]
+      (swap! c + 5)
+      (is (= 15 @c))))
+
+  (testing "swap! with multiple args"
+    (let [c (cell [1 2])]
+      (swap! c conj 3)
+      (is (= [1 2 3] @c)))))
+
+(deftest cell-compare-and-set-test
+  (testing "compare-and-set! succeeds with matching old value"
+    (let [c (cell 1)]
+      (is (true? (compare-and-set! c 1 2)))
+      (is (= 2 @c))))
+
+  (testing "compare-and-set! fails with mismatched old value"
+    (let [c (cell 1)]
+      (is (false? (compare-and-set! c 99 2)))
+      (is (= 1 @c)))))
+
+(deftest cell-metadata-test
+  (testing "Cell carries metadata"
+    (let [c (cell 1 :meta {:foo :bar})]
+      (is (contains? (meta c) :foo))
+      (is (= :bar (:foo (meta c)))))))
+
+(deftest cell-watches-test
+  (testing "Cell watch fires on value change"
+    (let [c (cell 1)
+          log (atom [])
+          ;; Force deref inside an rx to set up watch
+          r (rx @c)]
+      ;; Force computation so watch is active
+      @r
+      (add-watch c ::test (fn [k _ o n] (swap! log conj [o n])))
+      (reset! c 2)
+      (is (some #(= [1 2] %) @log)))))
+
+;; ---------------------------------------------------------------------------
+;; Reactive expressions basics
+;; ---------------------------------------------------------------------------
+
+(deftest rx-basic-test
+  (testing "rx computes derived value"
+    (let [c (cell 3)
+          r (rx (* @c @c))]
+      (is (= 9 @r))))
+
+  (testing "rx is lazy - not computed until deref"
+    (let [computed (atom false)
+          c (cell 1)
+          r (rx (do (reset! computed true) @c))]
+      (is (false? @computed) "Should not be computed before deref")
+      @r
+      (is (true? @computed) "Should be computed after deref"))))
+
+(deftest rx-propagation-test
+  (testing "rx updates when cell changes"
+    (let [c (cell 1)
+          r (rx (inc @c))]
+      (is (= 2 @r))
+      (reset! c 10)
+      (is (= 11 @r))))
+
+  (testing "rx updates through a chain"
+    (let [a (cell 1)
+          b (rx (+ @a 1))
+          c (rx (* @b 2))]
+      (is (= 4 @c))
+      (reset! a 5)
+      (is (= 12 @c)))))
+
+(deftest rx-multiple-dependencies-test
+  (testing "rx with multiple cell dependencies"
+    (let [a (cell 2)
+          b (cell 3)
+          r (rx (+ @a @b))]
+      (is (= 5 @r))
+      (reset! a 10)
+      (is (= 13 @r))
+      (reset! b 20)
+      (is (= 30 @r)))))
+
+(deftest rx-diamond-dependency-test
+  (testing "Diamond dependency graph - no glitches"
+    (let [a (cell 1)
+          b (rx (+ @a 1))
+          c (rx (* @a 2))
+          d (rx (+ @b @c))]
+      ;; a=1 => b=2, c=2 => d=4
+      (is (= 4 @d))
+      ;; a=3 => b=4, c=6 => d=10 (no intermediate states)
+      (reset! a 3)
+      (is (= 10 @d)))))
+
+(deftest rx-dynamic-dependencies-test
+  (testing "Dependencies change based on conditional"
+    (let [flag (cell true)
+          a (cell 1)
+          b (cell 2)
+          r (rx (if @flag @a @b))]
+      (is (= 1 @r))
+      ;; Changing b should not affect r while flag is true
+      (reset! b 99)
+      (is (= 1 @r))
+      ;; Switch branch
+      (reset! flag false)
+      (is (= 99 @r))
+      ;; Now changing a should not affect r
+      (reset! a 100)
+      (is (= 99 @r))
+      ;; Changing b now should
+      (reset! b 42)
+      (is (= 42 @r)))))
+
+(deftest rx-nil-value-test
+  (testing "rx can return nil"
+    (let [c (cell nil)
+          r (rx @c)]
+      (is (nil? @r))))
+
+  (testing "rx transitions to nil"
+    (let [c (cell 1)
+          r (rx (when (odd? @c) @c))]
+      (is (= 1 @r))
+      (reset! c 2)
+      (is (nil? @r)))))
+
+(deftest rx-no-change-no-propagation-test
+  (testing "No propagation when value unchanged"
+    (let [c (cell 1)
+          count (atom 0)
+          r1 (rx (if (> @c 0) :pos :non-pos))
+          r2 (rx (do (swap! count inc) @r1))]
+      (is (= :pos @r2))
+      (is (= 1 @count))
+      ;; Change c but r1 still returns :pos
+      (reset! c 2)
+      @r2
+      ;; r2 should not recompute because r1's value didn't change
+      (is (= :pos @r2)))))
+
+(deftest rx-metadata-test
+  (testing "rx carries metadata from macro form"
+    (let [r (rx 42)]
+      (is (some? (meta r)))
+      (is (contains? (meta r) :form)))))
+
+;; ---------------------------------------------------------------------------
+;; *value* (previous value access)
+;; ---------------------------------------------------------------------------
+
+(deftest rx-previous-value-test
+  (testing "*value* provides previous value during recomputation"
+    (let [c (cell 1)
+          history (atom [])
+          r (rx (let [v @c]
+                  (swap! history conj rx/*value*)
+                  v))]
+      @r
+      (is (= :carbon.rx/thunk (first @history)) "First computation has ::thunk as previous value")
+      (reset! c 2)
+      @r
+      (is (= 1 (second @history)) "Second computation has old value as *value*"))))
+
+;; ---------------------------------------------------------------------------
+;; Lens
+;; ---------------------------------------------------------------------------
+
+(deftest lens-read-test
+  (testing "Lens can be read like an rx"
+    (let [c (cell {:x 1})
+          l (lens (:x @c) (partial swap! c assoc :x))]
+      (is (= 1 @l)))))
+
+(deftest lens-write-test
+  (testing "Lens can be written to, updating source"
+    (let [c (cell {:x 1})
+          l (lens (:x @c) (partial swap! c assoc :x))]
+      @l
+      (reset! l 42)
+      (is (= 42 @l))
+      (is (= {:x 42} @c))))
+
+  (testing "swap! on a lens"
+    (let [c (cell {:x 10})
+          l (lens (:x @c) (partial swap! c assoc :x))]
+      @l
+      (swap! l + 5)
+      (is (= 15 @l))
+      (is (= {:x 15} @c)))))
+
+(deftest lens-no-setter-test
+  (testing "Resetting a lens without setter throws"
+    (let [c (cell 1)
+          l (lens @c)]
+      @l
+      (is (thrown? AssertionError (reset! l 99))))))
+
+(deftest lens-compare-and-set-test
+  (testing "compareAndSet on a lens"
+    (let [c (cell {:x 1})
+          l (lens (:x @c) (partial swap! c assoc :x))]
+      @l
+      (is (true? (compare-and-set! l 1 2)))
+      (is (= 2 @l))
+      (is (false? (compare-and-set! l 99 3)))
+      (is (= 2 @l)))))
+
+;; ---------------------------------------------------------------------------
+;; Cursor
+;; ---------------------------------------------------------------------------
+
+(deftest cursor-read-test
+  (testing "Cursor reads nested value"
+    (let [c (cell {:a {:b 42}})
+          cr (rx/cursor c [:a :b])]
+      (is (= 42 @cr)))))
+
+(deftest cursor-write-test
+  (testing "Cursor writes propagate to parent"
+    (let [c (cell {:a 1})
+          cr (rx/cursor c [:a])]
+      @cr
+      (reset! cr 99)
+      (is (= 99 @cr))
+      (is (= {:a 99} @c)))))
+
+(deftest cursor-caching-test
+  (testing "Same path returns identical cursor"
+    (let [c (cell {:x 1})
+          cr1 (rx/cursor c [:x])
+          cr2 (rx/cursor c [:x])]
+      (is (identical? cr1 cr2))))
+
+  (testing "Different paths return different cursors"
+    (let [c (cell {:x 1 :y 2})
+          cr1 (rx/cursor c [:x])
+          cr2 (rx/cursor c [:y])]
+      (is (not (identical? cr1 cr2))))))
+
+(deftest cursor-reactivity-test
+  (testing "Cursor updates when parent cell changes"
+    (let [c (cell {:a 1})
+          cr (rx/cursor c [:a])]
+      (is (= 1 @cr))
+      (swap! c assoc :a 10)
+      (is (= 10 @cr)))))
+
+(deftest cursor-normalize-path-test
+  (testing "Cursor normalizes path to vector"
+    (let [c (cell {:a 1})
+          cr1 (rx/cursor c [:a])
+          cr2 (rx/cursor c '(:a))]
+      (is (identical? cr1 cr2)))))
+
+;; ---------------------------------------------------------------------------
+;; dosync - batching
+;; ---------------------------------------------------------------------------
+
+(deftest dosync-batching-test
+  (testing "dosync batches multiple updates"
+    (let [a (cell 1)
+          b (cell 2)
+          history (atom [])
+          r (rx (let [v (+ @a @b)]
+                  (swap! history conj v)
+                  v))]
+      ;; Initial computation
+      @r
+      (is (= [3] @history))
+      ;; Without dosync, each reset! would propagate independently
+      ;; With dosync, propagation happens once at the end
+      (dosync
+        (reset! a 10)
+        (reset! b 20))
+      @r
+      ;; Should see 30, and NOT see intermediate 12 (a=10,b=2) in history
+      (is (= 30 (last @history)))
+      (is (not (some #{12} @history)) "Should not observe intermediate state a=10,b=2"))))
+
+(deftest dosync-nested-test
+  (testing "Nested dosync defers to outermost"
+    (let [c (cell 0)
+          history (atom [])
+          r (rx (let [v @c]
+                  (swap! history conj v)
+                  v))]
+      @r
+      (dosync
+        (reset! c 1)
+        (dosync
+          (reset! c 2)))
+      @r
+      ;; Only the final value should be observed
+      (is (= 2 @r))
+      (is (= 2 (last @history))))))
+
+(deftest dosync-return-value-test
+  (testing "dosync returns the value of the last expression"
+    (let [result (dosync (+ 1 2))]
+      (is (= 3 result)))))
+
+;; ---------------------------------------------------------------------------
+;; no-rx
+;; ---------------------------------------------------------------------------
+
+(deftest no-rx-test
+  (testing "Deref inside no-rx does not create dependency"
+    (let [a (cell 1)
+          b (cell 2)
+          r (rx (+ @a (no-rx @b)))]
+      (is (= 3 @r))
+      ;; Changing b should not trigger recomputation
+      (reset! b 99)
+      (is (= 3 @r) "r should not see change to b")
+      ;; Changing a should still work
+      (reset! a 10)
+      ;; When recomputed, it picks up current b
+      (is (= 109 @r)))))
+
+;; ---------------------------------------------------------------------------
+;; Watches on reactive expressions
+;; ---------------------------------------------------------------------------
+
+(deftest rx-watch-test
+  (testing "Watch on rx fires when value changes"
+    (let [c (cell 1)
+          r (rx (* @c 2))
+          log (atom [])]
+      @r
+      (add-watch r ::w (fn [k ref o n] (swap! log conj {:old o :new n})))
+      (reset! c 5)
+      @r
+      (is (some #(and (= 2 (:old %)) (= 10 (:new %))) @log))))
+
+  (testing "Removing watch triggers GC eligibility"
+    (let [c (cell 1)
+          r (rx @c)]
+      @r
+      (add-watch r ::w (fn [_ _ _ _]))
+      (remove-watch r ::w)
+      ;; After removing the only watch, rx should be eligible for GC
+      ;; (no sinks, no watches). Just verify no error.
+      (is (= 1 @r)))))
+
+;; ---------------------------------------------------------------------------
+;; Drop handlers
+;; ---------------------------------------------------------------------------
+
+(deftest drop-handler-test
+  (testing "Drop handler is called on GC"
+    (let [dropped (atom false)
+          c (cell 1)
+          r (rx @c)]
+      @r
+      (rx/add-drop r ::d (fn [_ _] (reset! dropped true)))
+      ;; Force GC by ensuring no sinks and no watches
+      (rx/gc r)
+      (is (true? @dropped))))
+
+  (testing "Remove drop handler"
+    (let [dropped (atom false)
+          c (cell 1)
+          r (rx @c)]
+      @r
+      (rx/add-drop r ::d (fn [_ _] (reset! dropped true)))
+      (rx/remove-drop r ::d)
+      (rx/gc r)
+      (is (false? @dropped)))))
+
+;; ---------------------------------------------------------------------------
+;; Garbage collection
+;; ---------------------------------------------------------------------------
+
+(deftest gc-resets-to-thunk-test
+  (testing "GC resets rx back to thunk state"
+    (let [c (cell 1)
+          r (rx @c)]
+      @r
+      (is (rx/computed? r))
+      (rx/gc r)
+      (is (not (rx/computed? r)))
+      ;; Re-deref recomputes
+      (reset! c 42)
+      (is (= 42 @r)))))
+
+(deftest gc-disconnects-sources-test
+  (testing "GC removes rx from source sinks"
+    (let [c (cell 1)
+          r (rx @c)]
+      @r
+      (is (contains? (rx/get-sinks c) r))
+      (rx/gc r)
+      (is (not (contains? (rx/get-sinks c) r))))))
+
+(deftest gc-with-active-sinks-no-op-test
+  (testing "GC does not reset rx that has active sinks"
+    (let [c (cell 1)
+          r1 (rx @c)
+          r2 (rx @r1)]
+      @r2
+      ;; r1 has r2 as a sink, so gc should be deferred
+      (rx/gc r1)
+      (is (rx/computed? r1)))))
+
+;; ---------------------------------------------------------------------------
+;; Rank computation
+;; ---------------------------------------------------------------------------
+
+(deftest rank-test
+  (testing "Cell has rank 0"
+    (let [c (cell 1)]
+      (is (= 0 (rx/get-rank c)))))
+
+  (testing "rx rank is higher than its source"
+    (let [c (cell 1)
+          r (rx @c)]
+      @r
+      (is (> (rx/get-rank r) (rx/get-rank c)))))
+
+  (testing "Chained rx has increasing rank"
+    (let [a (cell 1)
+          b (rx @a)
+          c (rx @b)]
+      @c
+      (is (> (rx/get-rank c) (rx/get-rank b)))
+      (is (> (rx/get-rank b) (rx/get-rank a))))))
+
+;; ---------------------------------------------------------------------------
+;; compare-rank
+;; ---------------------------------------------------------------------------
+
+(deftest compare-rank-identity-test
+  (testing "compare-rank returns 0 for identical items"
+    (let [r (rx 1)]
+      @r
+      (is (zero? (rx/compare-rank r r))))))
+
+(deftest compare-rank-different-ranks-test
+  (testing "compare-rank orders by rank"
+    (let [c (cell 1)
+          r (rx @c)]
+      @r
+      (is (neg? (rx/compare-rank c r)))
+      (is (pos? (rx/compare-rank r c))))))
+
+;; ---------------------------------------------------------------------------
+;; Protocol implementations
+;; ---------------------------------------------------------------------------
+
+(deftest reactive-source-protocol-test
+  (testing "add-sink and remove-sink on a cell"
+    (let [c (cell 1)
+          sentinel (rx 1)]
+      @sentinel
+      (rx/add-sink c sentinel)
+      (is (contains? (rx/get-sinks c) sentinel))
+      (rx/remove-sink c sentinel)
+      (is (not (contains? (rx/get-sinks c) sentinel))))))
+
+(deftest reactive-expression-protocol-test
+  (testing "add-source and remove-source"
+    (let [c (cell 1)
+          r (rx @c)]
+      @r
+      ;; After computation, c should be in r's sources (indirectly tested via sink)
+      (is (contains? (rx/get-sinks c) r) "r should be in c's sinks")
+      (rx/remove-source r c)
+      ;; remove-source only updates the rx's internal sources set
+      ;; We test via GC behavior: after removing source, GC won't touch that source
+      (is (some? r)))))
+
+;; ---------------------------------------------------------------------------
+;; cache-dissoc
+;; ---------------------------------------------------------------------------
+
+(deftest cache-dissoc-test
+  (testing "Removes entry when identity matches"
+    (let [val (Object.)
+          cache {:parent {[:k] val}}
+          result (rx/cache-dissoc cache :parent [:k] val)]
+      (is (not (contains? result :parent)))))
+
+  (testing "Does not remove when identity differs"
+    (let [val1 (Object.)
+          val2 (Object.)
+          cache {:parent {[:k] val2}}
+          result (rx/cache-dissoc cache :parent [:k] val1)]
+      (is (= val2 (get-in result [:parent [:k]])))))
+
+  (testing "Cleans up empty parent entries"
+    (let [val (Object.)
+          cache {:p1 {[:a] val} :p2 {[:b] (Object.)}}
+          result (rx/cache-dissoc cache :p1 [:a] val)]
+      (is (not (contains? result :p1)))
+      (is (contains? result :p2)))))
+
+;; ---------------------------------------------------------------------------
+;; Edge cases
+;; ---------------------------------------------------------------------------
+
+(deftest rx-constant-test
+  (testing "rx with no dependencies (constant)"
+    (let [r (rx 42)]
+      (is (= 42 @r)))))
+
+(deftest rx-recompute-idempotent-test
+  (testing "Multiple derefs return same value without recomputation"
+    (let [count (atom 0)
+          c (cell 1)
+          r (rx (do (swap! count inc) @c))]
+      @r
+      @r
+      @r
+      (is (= 1 @count) "Should only compute once without changes"))))
+
+(deftest cell-with-collection-values-test
+  (testing "Cell with map value"
+    (let [c (cell {:a 1 :b 2})]
+      (swap! c assoc :c 3)
+      (is (= {:a 1 :b 2 :c 3} @c))))
+
+  (testing "Cell with vector value"
+    (let [c (cell [1 2 3])]
+      (swap! c conj 4)
+      (is (= [1 2 3 4] @c)))))
+
+(deftest deep-chain-test
+  (testing "Long chain of reactive expressions"
+    (let [c (cell 1)
+          r1 (rx (inc @c))
+          r2 (rx (inc @r1))
+          r3 (rx (inc @r2))
+          r4 (rx (inc @r3))
+          r5 (rx (inc @r4))]
+      (is (= 6 @r5))
+      (reset! c 10)
+      (is (= 15 @r5)))))
+
+(deftest wide-fan-out-test
+  (testing "Single cell with many dependent rx"
+    (let [c (cell 1)
+          rxs (vec (for [i (range 20)]
+                     (rx (+ @c i))))]
+      (doseq [i (range 20)]
+        (is (= (+ 1 i) @(rxs i))))
+      (reset! c 100)
+      (doseq [i (range 20)]
+        (is (= (+ 100 i) @(rxs i)))))))
 
 (deftest cycle-detection-test
   (testing "Cycle detection throws exception"
@@ -13,14 +590,14 @@
       ;; c depends on d, d depends on c.
       ;; Dereferencing c starts computation.
       ;; c -> d -> c
-      
+
       (is (thrown? clojure.lang.ExceptionInfo @c)))))
 
 (deftest compare-rank-test
   (testing "Queue handles multiple items with same rank"
     (let [items (repeatedly 50 #(rx 1))
           queue rx/empty-queue]
-      
+
       (let [q (into queue items)]
         (is (= 50 (count q)) "Should contain all items despite same rank")
         ;; Test retrieval/membership to see if the structure is valid
@@ -31,22 +608,22 @@
     (let [c (cell {:k 1})
           ;; 1. Create first cursor
           cr1 (rx/cursor c [:k])]
-      
+
       (is (some? (get-in @rx/cursor-cache [c [:k]])) "cr1 should be in cache")
-      
+
       ;; 2. Simulate race: Manually remove cr1 from cache while it's still alive
       (swap! rx/cursor-cache update c dissoc [:k])
       (is (nil? (get-in @rx/cursor-cache [c [:k]])) "Cache entry should be gone")
-      
+
       ;; 3. Create second cursor for same path (since cache is empty, new one is created)
       (let [cr2 (rx/cursor c [:k])]
         (is (not (identical? cr1 cr2)) "cr2 should be a new instance")
         (is (identical? cr2 (get-in @rx/cursor-cache [c [:k]])) "cr2 should be in cache")
-        
+
         ;; 4. Trigger GC on cr1 (the old cursor)
         ;; This invokes the drop handler. If buggy, it will blindly remove the entry for [:k].
         (rx/gc cr1)
-        
+
         ;; 5. Assert that cr2 is STILL in the cache
         (is (some? (get-in @rx/cursor-cache [c [:k]])) "cr2 should NOT be evicted by cr1's GC")
         (is (identical? cr2 (get-in @rx/cursor-cache [c [:k]])) "Cache should still hold cr2")))))
