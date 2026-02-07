@@ -83,10 +83,10 @@
 
 (defn register
   [source]
-  (when *rx* ; *rank* too
+  (when *rx*
     (add-sink source *rx*)
     (add-source *rx* source)
-    (swap! *rank* max (get-rank source))))
+    (vswap! *rank* max (get-rank source))))
 
 (defn dosync*
   [f]
@@ -121,40 +121,29 @@
       @state)
   IReactiveSource
     (get-rank [_] @rank)
-    (add-sink [_ sink] (swap! sinks conj sink))
-    (remove-sink [_ sink] (swap! sinks disj sink))
+    (add-sink [_ sink] (vswap! sinks conj sink))
+    (remove-sink [_ sink] (vswap! sinks disj sink))
     (get-sinks [_] @sinks)
   IReactiveExpression
     (computed? [this] (not= @state ::thunk))
     (compute [this]
       (doseq [source @sources] (remove-sink source this))
-      (reset! sources #{})
+      (vreset! sources #{})
       (when (and *cycle-detection* (some #(identical? this %) *provenance*))
         (throw (ex-info (str
                           "carbon.rx: detected a cycle in computation graph!\n"
                           (pr-str (map meta *provenance*)))
                         {:provenance *provenance*})))
       (let [old-value @state
-            r (atom 0)
+            r (volatile! 0)
             new-value (binding [*rx* this
                                 *value* old-value
                                 *rank* r
                                 *provenance* (conj *provenance* this)]
-                        (let [x (getter)]
-                          ;; #?(:cljs
-                          ;;    (when ^boolean js/goog.DEBUG
-                          ;;      (when-not (fully-realized? x)
-                          ;;        (js/console.warn
-                          ;;          "carbon.rx: this branch returns not
-                          ;;          fully realized value, make sure that
-                          ;;          no dependencies are derefed inside
-                          ;;          lazy part:\n"
-                          ;;          (map meta *provenance*)
-                          ;;          "\n" x))))
-                          x))]
-        (reset! rank (inc @r))
+                        (getter))]
+        (vreset! rank (inc @r))
         (when (not= old-value new-value)
-          (reset! state new-value)
+          (vreset! state new-value)
           (doseq [[key f] @watches] (f key this old-value new-value)))
         new-value))
     (gc [this]
@@ -164,14 +153,14 @@
           (doseq [source @sources]
             (remove-sink source this)
             (when (satisfies? IReactiveExpression source) (gc source)))
-          (reset! sources #{})
-          (reset! state ::thunk)
+          (vreset! sources #{})
+          (vreset! state ::thunk)
           (notify-drops this))))
-    (add-source [_ source] (swap! sources conj source))
-    (remove-source [_ source] (swap! sources disj source))
+    (add-source [_ source] (vswap! sources conj source))
+    (remove-source [_ source] (vswap! sources disj source))
   IReactiveDrop
-    (add-drop [this key f] (swap! drop-handlers assoc key f) this)
-    (remove-drop [this key] (swap! drop-handlers dissoc key) this)
+    (add-drop [this key f] (vswap! drop-handlers assoc key f) this)
+    (remove-drop [this key] (vswap! drop-handlers dissoc key) this)
     (notify-drops [this] (doseq [[key f] @drop-handlers] (f key this)))
   IMeta
     (#?(:clj meta
@@ -182,9 +171,9 @@
             (getWatches [_] @watches)
             (addWatch [this key f]
               (when-not (computed? this) (compute this))
-              (swap! watches assoc key f)
+              (vswap! watches assoc key f)
               this)
-            (removeWatch [this key] (swap! watches dissoc key) (gc this) this)
+            (removeWatch [this key] (vswap! watches dissoc key) (gc this) this)
             IAtom (swap [this f] (macros/no-rx (reset! this (f @this))))
             (swap [this f x] (macros/no-rx (reset! this (f @this x))))
             (swap [this f x y] (macros/no-rx (reset! this (f @this x y))))
@@ -214,9 +203,9 @@
            (doseq [[key f] @watches] (f key this oldval newval)))
          (-add-watch [this key f]
            (when-not (computed? this) (compute this))
-           (swap! watches assoc key f)
+           (vswap! watches assoc key f)
            this)
-         (-remove-watch [this key] (swap! watches dissoc key) (gc this) this)
+         (-remove-watch [this key] (vswap! watches dissoc key) (gc this) this)
          IReset
          (-reset! [_ new-value]
            (assert setter "Can't reset lens w/o setter")
@@ -246,8 +235,8 @@
 #?(:clj (deftype Cell [state metadata sinks watching]
           IReactiveSource
             (get-rank [_] 0)
-            (add-sink [_ sink] (swap! sinks conj sink))
-            (remove-sink [_ sink] (swap! sinks disj sink))
+            (add-sink [_ sink] (vswap! sinks conj sink))
+            (remove-sink [_ sink] (vswap! sinks disj sink))
             (get-sinks [_] @sinks)
           IDeref
             (deref [this]
@@ -274,16 +263,16 @@
           Object
             (toString [_] (str "#<Cell: " (pr-str @state) ">"))))
 
-#?(:clj (defn atom->cell [a m] (Cell. a m (atom #{}) (atom false)))
+#?(:clj (defn atom->cell [a m] (Cell. a m (volatile! #{}) (atom false)))
    :cljs (defn atom->cell
            [a _]
-           (let [sinks (atom #{})
+           (let [sinks (volatile! #{})
                  watching (atom false)]
              (specify! a
                        IReactiveSource
                        (get-rank [_] 0)
-                       (add-sink [_ sink] (swap! sinks conj sink))
-                       (remove-sink [_ sink] (swap! sinks disj sink))
+                       (add-sink [_ sink] (vswap! sinks conj sink))
+                       (remove-sink [_ sink] (vswap! sinks disj sink))
                        (get-sinks [_] @sinks)
                        IDeref
                        (-deref [this]
@@ -306,12 +295,12 @@
                         setter
                         meta
                         validator
-                        (atom drop-fns)
-                        (atom ::thunk)
-                        (atom {})
-                        (atom 0)
-                        (atom #{})
-                        (atom #{}))))
+                        (volatile! drop-fns)
+                        (volatile! ::thunk)
+                        (volatile! {})
+                        (volatile! 0)
+                        (volatile! #{})
+                        (volatile! #{}))))
 
 ;; ---------------------------------------------------------------------------
 ;; cursor-cache backed by WeakHashMap on JVM, WeakMap on CLJS. Parent cells

@@ -585,6 +585,82 @@
       (remove-watch final ::keep-alive))))
 
 ;; ---------------------------------------------------------------------------
+;; Dependency tracking (sink-set invariants)
+;; ---------------------------------------------------------------------------
+
+(deftest dependency-switch-cleans-sinks-test
+  (testing "When rx switches branch, old source loses the rx from its sinks"
+    (let [flag (cell true)
+          a (cell 1)
+          b (cell 2)
+          r (rx (if @flag @a @b))]
+      @r
+      ;; Keep r alive
+      (add-watch r ::keep (fn [_ _ _ _]))
+      ;; r depends on flag and a; b is not a dependency
+      (is (contains? (rx/get-sinks a) r))
+      (is (not (contains? (rx/get-sinks b) r)))
+      ;; Switch to b branch
+      (reset! flag false)
+      ;; Now r depends on flag and b; a should no longer have r as a sink
+      (is (not (contains? (rx/get-sinks a) r))
+          "a should lose r from sinks after branch switch")
+      (is (contains? (rx/get-sinks b) r)
+          "b should gain r as a sink after branch switch")
+      ;; flag is still a dependency in both branches
+      (is (contains? (rx/get-sinks flag) r))
+      (remove-watch r ::keep))))
+
+(deftest stable-deps-preserve-sinks-test
+  (testing "Stable dependencies maintain correct sink membership across updates"
+    (let [a (cell 1)
+          b (cell 2)
+          r (rx (+ @a @b))]
+      @r
+      (add-watch r ::keep (fn [_ _ _ _]))
+      (is (contains? (rx/get-sinks a) r))
+      (is (contains? (rx/get-sinks b) r))
+      ;; Update a - dependencies are unchanged
+      (reset! a 10)
+      (is (= 12 @r))
+      (is (contains? (rx/get-sinks a) r)
+          "a should still have r as a sink after value update")
+      (is (contains? (rx/get-sinks b) r)
+          "b should still have r as a sink after value update")
+      ;; Update b
+      (reset! b 20)
+      (is (= 30 @r))
+      (is (contains? (rx/get-sinks a) r))
+      (is (contains? (rx/get-sinks b) r))
+      (remove-watch r ::keep))))
+
+(deftest dependency-growth-test
+  (testing "Rx acquires new dependency when conditional adds a source"
+    (let [flag (cell false)
+          a (cell 1)
+          b (cell 2)
+          r (rx (if @flag (+ @a @b) @a))]
+      @r
+      (add-watch r ::keep (fn [_ _ _ _]))
+      ;; Initially: depends on flag and a only
+      (is (contains? (rx/get-sinks a) r))
+      (is (not (contains? (rx/get-sinks b) r)))
+      ;; Turn on both-branch
+      (reset! flag true)
+      ;; Now depends on flag, a, and b
+      (is (= 3 @r))
+      (is (contains? (rx/get-sinks a) r))
+      (is (contains? (rx/get-sinks b) r)
+          "b should be added to sinks when becoming a dependency")
+      ;; Switch back
+      (reset! flag false)
+      (is (= 1 @r))
+      (is (contains? (rx/get-sinks a) r))
+      (is (not (contains? (rx/get-sinks b) r))
+          "b should be removed from sinks when no longer a dependency")
+      (remove-watch r ::keep))))
+
+;; ---------------------------------------------------------------------------
 ;; Edge cases
 ;; ---------------------------------------------------------------------------
 
