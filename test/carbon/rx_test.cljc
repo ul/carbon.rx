@@ -1,7 +1,8 @@
 (ns carbon.rx-test
   (:require [clojure.test :refer [deftest is testing]]
             [carbon.rx :as rx]
-            [carbon.macros :refer [cell rx lens dosync no-rx]]))
+            [carbon.macros :refer [cell rx lens dosync no-rx]])
+  #?(:clj (:import [java.lang.ref WeakReference])))
 
 ;; ---------------------------------------------------------------------------
 ;; Cell basics
@@ -606,24 +607,117 @@
 (deftest cursor-cache-race-test
   (testing "Cursor GC does not evict newer cursors for same path"
     (let [c (cell {:k 1})
-          ;; 1. Create first cursor
           cr1 (rx/cursor c [:k])]
 
-      (is (some? (get-in @rx/cursor-cache [c [:k]])) "cr1 should be in cache")
+      (is (some? (rx/cursor-cached c [:k])) "cr1 should be in cache")
 
-      ;; 2. Simulate race: Manually remove cr1 from cache while it's still alive
-      (swap! rx/cursor-cache update c dissoc [:k])
-      (is (nil? (get-in @rx/cursor-cache [c [:k]])) "Cache entry should be gone")
+      ;; Simulate race: evict cr1 from cache
+      (rx/cursor-cache-evict! c [:k])
+      (is (nil? (rx/cursor-cached c [:k])) "Cache entry should be gone")
 
-      ;; 3. Create second cursor for same path (since cache is empty, new one is created)
+      ;; Create second cursor for same path (since cache is empty, new one is created)
       (let [cr2 (rx/cursor c [:k])]
         (is (not (identical? cr1 cr2)) "cr2 should be a new instance")
-        (is (identical? cr2 (get-in @rx/cursor-cache [c [:k]])) "cr2 should be in cache")
+        (is (identical? cr2 (rx/cursor-cached c [:k])) "cr2 should be in cache")
 
-        ;; 4. Trigger GC on cr1 (the old cursor)
-        ;; This invokes the drop handler. If buggy, it will blindly remove the entry for [:k].
+        ;; Trigger GC on cr1 (the old cursor)
         (rx/gc cr1)
 
-        ;; 5. Assert that cr2 is STILL in the cache
-        (is (some? (get-in @rx/cursor-cache [c [:k]])) "cr2 should NOT be evicted by cr1's GC")
-        (is (identical? cr2 (get-in @rx/cursor-cache [c [:k]])) "Cache should still hold cr2")))))
+        ;; Assert that cr2 is STILL in the cache
+        (is (some? (rx/cursor-cached c [:k])) "cr2 should NOT be evicted by cr1's GC")
+        (is (identical? cr2 (rx/cursor-cached c [:k])) "Cache should still hold cr2")))))
+
+(deftest monotonic-id-test
+  (testing "IDs are monotonically increasing for newly created reactive objects"
+    (let [a (rx 1)
+          b (rx 1)
+          c (rx 1)]
+      (is (< (rx/id a) (rx/id b)))
+      (is (< (rx/id b) (rx/id c)))))
+
+  (testing "IDs are unique across many objects"
+    (let [objects (doall (repeatedly 1000 #(rx 1)))
+          ids (map rx/id objects)]
+      (is (= 1000 (count (set ids)))))))
+
+#?(:clj
+   (deftest cursor-cache-weak-ref-test
+     (testing "Cursor cache does not prevent GC of parent cells"
+       ;; Create a cell + cursor, deref to force computation, then GC both.
+       ;; The cursor's lens closure captures the parent, so we must also drop
+       ;; the cursor reference.  With a WeakHashMap, once no strong refs remain
+       ;; to the parent (from user code or cached cursors), the cache entry is
+       ;; eligible for collection.
+       (let [weak-ref (let [c (cell {:x 1})
+                            cr (rx/cursor c [:x])]
+                        @cr
+                        ;; GC the cursor so it drops out of the cache via its
+                        ;; drop handler; this removes the closure holding `c`.
+                        (rx/gc cr)
+                        (WeakReference. c))]
+         ;; Now no strong references to the cell remain.
+         (System/gc)
+         (System/gc)
+         (Thread/sleep 100)
+         (System/gc)
+         (is (nil? (.get weak-ref))
+             "Parent cell should be GC-eligible after cursor is GC'd")))))
+
+#?(:clj
+   (deftest rx-get-validator-test
+     (testing "getValidator on ReactiveExpression returns the validator function"
+       (let [v (fn [x] (pos? x))
+             r (rx/rx* (fn [] 1) (fn [x]) nil v)]
+         @r
+         (is (= v (.getValidator r))
+             "getValidator should return the validator passed at construction")))))
+
+#?(:clj
+   (deftest cell-get-validator-test
+     (testing "Cell getValidator delegates to underlying atom"
+       (let [v pos?
+             c (cell 1 :validator v)]
+         (is (= v (.getValidator c))
+             "Cell getValidator should return the atom's validator")))))
+
+(deftest cycle-detection-flag-test
+  (testing "*cycle-detection* defaults to true (development)"
+    (is (true? rx/*cycle-detection*)))
+
+  (testing "Cycle detected when *cycle-detection* is explicitly true"
+    (binding [rx/*cycle-detection* true]
+      (let [d-ref (atom nil)
+            c (rx (if @d-ref @@d-ref 1))
+            d (rx @c)]
+        (reset! d-ref d)
+        (is (thrown? clojure.lang.ExceptionInfo @c)))))
+
+  (testing "Cycle detection can be disabled via binding"
+    ;; When disabled, cycle detection guard is skipped.
+    ;; The cycle itself will cause a StackOverflowError instead.
+    (binding [rx/*cycle-detection* false]
+      (let [d-ref (atom nil)
+            c (rx (if @d-ref @@d-ref 1))
+            d (rx @c)]
+        (reset! d-ref d)
+        (is (thrown? StackOverflowError @c))))))
+
+#?(:clj
+   (deftest cell-tostring-test
+     (testing "Cell has a readable string representation"
+       (let [c (cell 42)]
+         (is (re-find #"42" (str c))
+             "Cell toString should include its value")))))
+
+#?(:clj
+   (deftest rx-tostring-test
+     (testing "ReactiveExpression has a readable string representation"
+       (let [r (rx 42)]
+         @r
+         (is (re-find #"42" (str r))
+             "ReactiveExpression toString should include its computed value")))
+
+     (testing "Uncomputed rx shows thunk state"
+       (let [r (rx 42)]
+         (is (re-find #"thunk" (str r))
+             "Uncomputed rx toString should indicate thunk state")))))
