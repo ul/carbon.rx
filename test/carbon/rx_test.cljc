@@ -1,8 +1,9 @@
 (ns carbon.rx-test
   (:require [clojure.test :refer [deftest is testing]]
             [carbon.rx :as rx]
-            [carbon.macros :refer [cell rx lens dosync no-rx]])
-  #?(:clj (:import [java.lang.ref WeakReference])))
+            #?(:clj [carbon.macros :refer [cell rx lens dosync no-rx]]))
+  #?(:clj (:import [java.lang.ref WeakReference]))
+  #?(:cljs (:require-macros [carbon.macros :refer [cell rx lens dosync no-rx]])))
 
 ;; ---------------------------------------------------------------------------
 ;; Cell basics
@@ -212,7 +213,7 @@
     (let [c (cell 1)
           l (lens @c)]
       @l
-      (is (thrown? AssertionError (reset! l 99))))))
+      (is (thrown? #?(:clj AssertionError :cljs js/Error) (reset! l 99))))))
 
 (deftest lens-compare-and-set-test
   (testing "compareAndSet on a lens"
@@ -673,7 +674,7 @@
       ;; c depends on d, d depends on c.
       ;; Dereferencing c starts computation.
       ;; c -> d -> c
-      (is (thrown? clojure.lang.ExceptionInfo @c)))))
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo) @c)))))
 
 (deftest many-same-rank-sinks-test
   (testing "Propagation handles many sinks at the same rank"
@@ -760,16 +761,58 @@
             c (rx (if @d-ref @@d-ref 1))
             d (rx @c)]
         (reset! d-ref d)
-        (is (thrown? clojure.lang.ExceptionInfo @c)))))
-  (testing "Cycle detection can be disabled via binding"
-    ;; When disabled, cycle detection guard is skipped. The cycle itself
-    ;; will cause a StackOverflowError instead.
-    (binding [rx/*cycle-detection* false]
-      (let [d-ref (atom nil)
-            c (rx (if @d-ref @@d-ref 1))
-            d (rx @c)]
-        (reset! d-ref d)
-        (is (thrown? StackOverflowError @c))))))
+        (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo) @c)))))
+  #?(:clj
+     (testing "Cycle detection can be disabled via binding"
+       ;; When disabled, cycle detection guard is skipped. The cycle itself
+       ;; will cause a StackOverflowError instead.
+       (binding [rx/*cycle-detection* false]
+         (let [d-ref (atom nil)
+               c (rx (if @d-ref @@d-ref 1))
+               d (rx @c)]
+           (reset! d-ref d)
+           (is (thrown? StackOverflowError @c)))))))
+
+(deftest no-sinks-no-propagation-test
+  (testing "Mutating a cell with no sinks does not trigger propagation"
+    (let [c (cell 0)
+          side-effect (atom 0)]
+      ;; Create and force an rx, then remove it so c has no sinks
+      (let [r (rx (do (swap! side-effect inc) @c))]
+        @r
+        ;; Remove the watch so gc clears the rx
+        (rx/gc r))
+      (reset! side-effect 0)
+      ;; Now c has no sinks; mutations should be cheap and cause no side effects
+      (dotimes [_ 100] (swap! c inc))
+      (is (= 100 @c))
+      (is (= 0 @side-effect)
+          "No rx should have been computed since c has no sinks"))))
+
+(deftest duplicate-source-deref-test
+  (testing "Derefing the same source twice in one rx doesn't duplicate sinks"
+    (let [c (cell 1)
+          r (rx (+ @c @c))]
+      @r
+      (add-watch r ::keep (fn [_ _ _ _]))
+      (is (= 2 @r))
+      ;; c should have r as a sink exactly once (set semantics)
+      (is (contains? (rx/get-sinks c) r))
+      ;; Verify propagation still works correctly
+      (reset! c 5)
+      (is (= 10 @r))
+      (remove-watch r ::keep))))
+
+(deftest triple-source-deref-test
+  (testing "Source deref'd three times still tracks correctly"
+    (let [c (cell 10)
+          r (rx (* @c @c @c))]
+      @r
+      (add-watch r ::keep (fn [_ _ _ _]))
+      (is (= 1000 @r))
+      (reset! c 2)
+      (is (= 8 @r))
+      (remove-watch r ::keep))))
 
 #?(:clj (deftest cell-tostring-test
           (testing "Cell has a readable string representation"
