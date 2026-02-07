@@ -7,4 +7,8 @@
   :dependencies [[org.clojure/clojure "1.12.4"]
                  [org.clojure/clojurescript "1.12.134"]]
 
-  :source-paths ["src"])
+  :source-paths ["src"]
+
+  :profiles {:bench {:source-paths ["bench"]
+                     :dependencies [[criterium "0.4.6"]]
+                     :main carbon.rx-bench}})

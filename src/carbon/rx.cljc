@@ -35,26 +35,34 @@
   #?(:clj *assert*
      :cljs js/goog.DEBUG))
 
-#?(:clj (let [^java.util.Map id-map (Collections/synchronizedMap (WeakHashMap.))
-              counter (atom 0)]
-          (defn id
-            [x]
-            (locking id-map
-              (if-let [uid (.get id-map x)]
-                uid
-                (let [uid (swap! counter inc)]
-                  (.put id-map x (long uid))
-                  uid)))))
-   :cljs (defn id [x] (goog/getUid x)))
+;; ---------------------------------------------------------------------------
+;; Rank-bucketed priority queue: sorted-map rank → #{nodes}
+;; ---------------------------------------------------------------------------
 
-(defn compare-rank
-  [x y]
-  (if (identical? x y)
-    0
-    (let [z (- (get-rank x) (get-rank y))]
-      (if (zero? z) (compare (id x) (id y)) z))))
+(def empty-queue (sorted-map))
 
-(def empty-queue (sorted-set-by compare-rank))
+(defn- queue-add
+  "Add a single reactive node to the queue, bucketed by its rank."
+  [q node]
+  (let [r (get-rank node)] (update q r (fnil conj #{}) node)))
+
+(defn- queue-into
+  "Add all `nodes` to the queue."
+  [q nodes]
+  (reduce queue-add q nodes))
+
+(defn- queue-pop
+  "Remove and return [node, queue'] for the lowest-rank node."
+  [q]
+  (when-let [[r bucket] (first q)]
+    (let [node (first bucket)
+          bucket' (disj bucket node)]
+      [node (if (empty? bucket') (dissoc q r) (assoc q r bucket'))])))
+
+(defn- queue-rseq
+  "Return a seq of all nodes in descending rank order."
+  [q]
+  (mapcat val (rseq q)))
 
 (defn propagate
   "Recursively compute all dirty sinks in the `queue` and return all visited sources to clean."
@@ -63,20 +71,15 @@
             *rank* nil] ; try to be foolproof
     (loop [queue queue
            dirty '()]
-      (if-let [x (first queue)]
-        (let [queue (disj queue x)]
-          (recur (if (= @x (compute x))
-                   queue
-                   (->> x
-                        get-sinks
-                        (into queue)))
-                 (conj dirty x)))
+      (if-let [[x queue'] (queue-pop queue)]
+        (recur (if (= @x (compute x)) queue' (queue-into queue' (get-sinks x)))
+               (conj dirty x))
         dirty))))
 
 (defn clean
   "Recursively garbage collect all disconnected sources in the `queue`"
-  [queue]
-  (doseq [source queue] (gc source)))
+  [sources]
+  (doseq [source sources] (gc source)))
 
 (defn register
   [source]
@@ -93,9 +96,9 @@
     ;; top-level dosync*
     (when-not *dirty-sinks*
       (binding [*dirty-sources* sources]
-        (swap! *dirty-sources* into (propagate @sinks))))
+        (swap! *dirty-sources* queue-into (propagate @sinks))))
     ;; top-level dosync*
-    (when-not *dirty-sources* (clean (reverse @sources)))
+    (when-not *dirty-sources* (clean (queue-rseq @sources)))
     result))
 
 #?(:cljs
@@ -156,7 +159,7 @@
         new-value))
     (gc [this]
       (if *dirty-sources*
-        (swap! *dirty-sources* conj this)
+        (swap! *dirty-sources* queue-add this)
         (when (and (empty? @sinks) (empty? @watches))
           (doseq [source @sources]
             (remove-sink source this)
@@ -237,7 +240,8 @@
 
 (defn watch
   [source _ o n]
-  (when (not= o n) (dosync* #(swap! *dirty-sinks* into (get-sinks source)))))
+  (when (not= o n)
+    (dosync* #(swap! *dirty-sinks* queue-into (get-sinks source)))))
 
 #?(:clj (deftype Cell [state metadata sinks watching]
           IReactiveSource
@@ -310,24 +314,21 @@
                         (atom #{}))))
 
 ;; ---------------------------------------------------------------------------
-;; cursor-cache backed by WeakHashMap on JVM. Parent cells used as keys are
-;; held
-;; weakly, so they can be GC'd when no strong references remain. On CLJS, a
-;; plain atom is kept (JS WeakMap would prevent iteration which some tooling
-;; relies on).
+;; cursor-cache backed by WeakHashMap on JVM, WeakMap on CLJS. Parent cells
+;; used as keys are held weakly, so they can be GC'd when no strong references
+;; remain.
 ;; ---------------------------------------------------------------------------
 
 #?(:clj (def ^:private ^java.util.Map cursor-cache-impl
           (Collections/synchronizedMap (WeakHashMap.)))
-   :cljs (def ^:private cursor-cache-impl (atom {})))
+   :cljs (def ^:private cursor-cache-impl (js/WeakMap.)))
 
 ;; Public helpers for cache inspection (used by tests and tooling).
 
 (defn cursor-cached
   "Return the cached cursor for `parent` at `path`, or nil."
   [parent path]
-  #?(:clj (when-let [m (.get cursor-cache-impl parent)] (get m (vec path)))
-     :cljs (get-in @cursor-cache-impl [parent (vec path)])))
+  (when-let [m (.get cursor-cache-impl parent)] (get m (vec path))))
 
 (defn cursor-cache-evict!
   "Remove the cache entry for `parent` at `path` (unconditionally)."
@@ -339,31 +340,11 @@
                   (if (empty? m')
                     (.remove cursor-cache-impl parent)
                     (.put cursor-cache-impl parent m')))))
-       :cljs (swap! cursor-cache-impl
-               (fn [cache]
-                 (let [cache (update cache parent dissoc path)]
-                   (if (empty? (get cache parent))
-                     (dissoc cache parent)
-                     cache)))))))
-
-;; Backward-compatible atom wrapper so existing code using @cursor-cache still
-;; compiles.  On JVM this delegates reads to the WeakHashMap; on CLJS it IS the
-;; atom.
-#?(:clj (def cursor-cache
-          (reify
-            IDeref
-              (deref [_]
-                (locking cursor-cache-impl (into {} cursor-cache-impl)))))
-   :cljs (def cursor-cache cursor-cache-impl))
-
-;; cache-dissoc is kept as a public pure function for backward compatibility
-;; and CLJS usage.
-(defn cache-dissoc
-  [cache parent path val]
-  (if (identical? val (get-in cache [parent path]))
-    (let [cache (update cache parent dissoc path)]
-      (if (empty? (get cache parent)) (dissoc cache parent) cache))
-    cache))
+       :cljs (when-let [m (.get cursor-cache-impl parent)]
+               (let [m' (dissoc m path)]
+                 (if (empty? m')
+                   (.delete cursor-cache-impl parent)
+                   (.set cursor-cache-impl parent m')))))))
 
 (def normalize-cursor-path vec)
 
@@ -371,8 +352,7 @@
 
 (defn- cursor-cache-get
   [parent path]
-  #?(:clj (when-let [m (.get cursor-cache-impl parent)] (get m path))
-     :cljs (get-in @cursor-cache-impl [parent path])))
+  (when-let [m (.get cursor-cache-impl parent)] (get m path)))
 
 (defn- cursor-cache-put!
   [parent path val]
@@ -380,7 +360,9 @@
             (.put cursor-cache-impl
                   parent
                   (assoc (or (.get cursor-cache-impl parent) {}) path val)))
-     :cljs (swap! cursor-cache-impl assoc-in [parent path] val)))
+     :cljs (.set cursor-cache-impl
+                 parent
+                 (assoc (or (.get cursor-cache-impl parent) {}) path val))))
 
 (defn- cursor-cache-dissoc!
   [parent path val]
@@ -391,7 +373,12 @@
                   (if (empty? m')
                     (.remove cursor-cache-impl parent)
                     (.put cursor-cache-impl parent m'))))))
-     :cljs (swap! cursor-cache-impl cache-dissoc parent path val)))
+     :cljs (when-let [m (.get cursor-cache-impl parent)]
+             (when (identical? val (get m path))
+               (let [m' (dissoc m path)]
+                 (if (empty? m')
+                   (.delete cursor-cache-impl parent)
+                   (.set cursor-cache-impl parent m')))))))
 
 (defn cursor
   [parent path]

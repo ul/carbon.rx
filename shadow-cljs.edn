@@ -1,0 +1,5 @@
+{:source-paths ["src" "bench"]
+ :dependencies [[org.clojure/clojurescript "1.12.134"]]
+ :builds {:bench {:target :node-script
+                  :output-to "target/bench.js"
+                  :main carbon.rx-bench/main}}}
